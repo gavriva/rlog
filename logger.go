@@ -1,10 +1,12 @@
 package rlog
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"runtime"
 	"strings"
 	"sync"
@@ -43,11 +45,12 @@ type logLine struct {
 }
 
 type Logger struct {
-	inputQueue      chan logLine
-	consoleQueue    chan logLine
-	currentFile     *os.File
-	currentFileSize int64
-	options         Options
+	inputQueue   chan logLine
+	consoleQueue chan logLine
+	fp           *os.File
+	fileWriter   *bufio.Writer
+	fileSize     int64
+	options      Options
 
 	wg sync.WaitGroup
 }
@@ -77,35 +80,40 @@ type Options struct {
 	LogfilePrefix string
 }
 
-func New(opt *Options) *Logger {
+func New(opts Options) *Logger {
 	l := &Logger{
 		inputQueue: make(chan logLine, 2048),
+		options:    opts,
 	}
 
-	if opt.LowerLevelToFile < DEBUG {
-		opt.LowerLevelToFile = INFO
+	if l.options.LowerLevelToFile < DEBUG {
+		l.options.LowerLevelToFile = INFO
+	} else if l.options.LowerLevelToFile > DISABLED {
+		l.options.LowerLevelToFile = DISABLED
 	}
 
-	if opt.LowerLevelToConsole < DEBUG {
-		opt.LowerLevelToConsole = AUDIT
+	if l.options.LowerLevelToConsole < DEBUG {
+		l.options.LowerLevelToConsole = AUDIT
+	} else if l.options.LowerLevelToConsole > DISABLED {
+		l.options.LowerLevelToConsole = DISABLED
 	}
 
-	if opt.MaxFileSize <= 16000 {
-		opt.MaxFileSize = 100 * 1024 * 1024
+	if l.options.MaxFileSize <= 16000 {
+		l.options.MaxFileSize = 100 * 1024 * 1024
 	}
 
-	if opt.MaxLogFiles <= 0 {
-		opt.MaxLogFiles = 3
+	if l.options.MaxLogFiles <= 0 {
+		l.options.MaxLogFiles = 3
 	}
 
-	if opt.MaxLogFiles > 10 {
-		opt.MaxLogFiles = 10
+	if l.options.MaxLogFiles > 10 {
+		l.options.MaxLogFiles = 10
 	}
 
-	if len(opt.LogfilePrefix) == 0 {
-		opt.LogfilePrefix = os.Args[0]
-		if strings.HasSuffix(opt.LogfilePrefix, ".bin") || strings.HasPrefix(opt.LogfilePrefix, ".app") {
-			opt.LogfilePrefix = opt.LogfilePrefix[:len(opt.LogfilePrefix)-4]
+	if len(l.options.LogfilePrefix) == 0 {
+		l.options.LogfilePrefix = path.Base(os.Args[0])
+		if strings.HasSuffix(l.options.LogfilePrefix, ".bin") || strings.HasPrefix(l.options.LogfilePrefix, ".app") {
+			l.options.LogfilePrefix = l.options.LogfilePrefix[:len(l.options.LogfilePrefix)-4]
 		}
 	}
 
@@ -113,43 +121,55 @@ func New(opt *Options) *Logger {
 
 	go func() {
 		defer l.wg.Done()
-		for line := range l.inputQueue {
-			if line.level >= l.options.LowerLevelToConsole {
-				sent := false
-				for sent == false {
-					select {
-					case l.consoleQueue <- line:
-						sent = true
-					default:
+
+		ticker := time.NewTicker(time.Millisecond * 333)
+
+		defer ticker.Stop()
+
+		for {
+			select {
+			case line := <-l.inputQueue:
+				if line.level >= l.options.LowerLevelToConsole && l.consoleQueue != nil {
+					sent := false
+					for sent == false {
 						select {
-						case <-l.consoleQueue:
+						case l.consoleQueue <- line:
+							sent = true
 						default:
+							select {
+							case <-l.consoleQueue:
+							default:
+							}
 						}
 					}
 				}
-			}
-			if line.level >= l.options.LowerLevelToFile {
-				l.newFileLine(line)
-			}
-
-			if line.level >= FATAL {
-				break
+				if line.level == closeLevel {
+					return
+				}
+				if line.level >= l.options.LowerLevelToFile {
+					l.newFileLine(line)
+				}
+			case <-ticker.C:
+				if l.fp != nil {
+					l.fileWriter.Flush()
+				}
 			}
 		}
 	}()
 
-	if opt.LowerLevelToConsole < DISABLED {
+	if l.options.LowerLevelToConsole <= FATAL {
 		l.consoleQueue = make(chan logLine, 101)
 		l.wg.Add(1)
 
 		go func() {
 			defer l.wg.Done()
 			for line := range l.consoleQueue {
-				l.newConsoleLine(line)
 
-				if line.level >= FATAL {
-					break
+				if line.level == closeLevel {
+					return
 				}
+
+				l.newConsoleLine(line)
 			}
 		}()
 	}
@@ -158,8 +178,14 @@ func New(opt *Options) *Logger {
 }
 
 func (l *Logger) Close() {
-	l.inputQueue <- logLine{"", closeLevel, time.Now()}
+	l.inputQueue <- logLine{"", closeLevel, time.Time{}}
 	l.wg.Wait()
+
+	if l.fp != nil {
+		l.fileWriter.Flush()
+		l.fp.Close()
+		l.fp = nil
+	}
 	l.inputQueue = nil
 }
 
@@ -171,9 +197,9 @@ func (l *Logger) writeFileLine(line logLine) {
 	hour, min, sec := line.tm.Clock()
 	us := line.tm.Nanosecond() / 1e3
 
-	if l.currentFile != nil {
-		n, _ := fmt.Fprintf(l.currentFile, "%04d.%02d.%02d %02d:%02d:%02d.%06d %s %s\n", year, month, day, hour, min, sec, us, prefix, line.msg)
-		l.currentFileSize += int64(n)
+	if l.fileWriter != nil {
+		n, _ := fmt.Fprintf(l.fileWriter, "%04d.%02d.%02d %02d:%02d:%02d.%06d %s %s\n", year, month, day, hour, min, sec, us, prefix, line.msg)
+		l.fileSize += int64(n)
 	}
 }
 
@@ -190,18 +216,20 @@ func (l *Logger) newFileLine(line logLine) {
 		return
 	}
 
-	if l.currentFile == nil {
+	if l.fp == nil {
 		var err error
-		l.currentFile, err = os.OpenFile(l.logFileName(0), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0666)
-		if err != nil || l.currentFile == nil {
+		l.fp, err = os.OpenFile(l.logFileName(0), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0664)
+		if err != nil || l.fp == nil {
 			return
 		}
 
-		fi, err := l.currentFile.Stat()
+		l.fileWriter = bufio.NewWriterSize(l.fp, 128*1024)
+
+		fi, err := l.fp.Stat()
 		if err == nil {
-			l.currentFileSize = fi.Size()
+			l.fileSize = fi.Size()
 		} else {
-			l.currentFileSize = 0
+			l.fileSize = 0
 		}
 		l.writeFileLine(logLine{
 			msg:   "\n\n====================",
@@ -210,16 +238,24 @@ func (l *Logger) newFileLine(line logLine) {
 		})
 	}
 
-	if l.currentFileSize+int64(len(line.msg))+33 > l.options.MaxFileSize {
+	if l.fileSize+int64(len(line.msg))+33 > l.options.MaxFileSize {
+
+		l.fileWriter.Flush()
+		l.fp.Close()
+
 		for i := int(l.options.MaxLogFiles) - 1; i > 0; i-- {
 			os.Rename(l.logFileName(i-1), l.logFileName(i))
 		}
 		var err error
-		l.currentFileSize = 0
-		l.currentFile, err = os.OpenFile(l.logFileName(0), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0666)
-		if err != nil || l.currentFile == nil {
+		l.fileSize = 0
+		l.fp, err = os.OpenFile(l.logFileName(0), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0664)
+		if err != nil || l.fp == nil {
+			l.fp = nil
+			l.fileWriter = nil
 			return
 		}
+		l.fileWriter.Reset(l.fp)
+
 		l.writeFileLine(logLine{
 			msg:   "\n\n====================",
 			level: AUDIT,
@@ -344,76 +380,131 @@ func (l *Logger) addLinef(level Level, format string, a []interface{}) {
 	}
 }
 
-func init() {
-	SetDefaultLogger(New(&Options{}))
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+func (l *Logger) Debugf(format string, v ...interface{}) {
+	l.addLinef(DEBUG, format, v)
 }
 
+func (l *Logger) Debug(v ...interface{}) {
+	l.addLine(DEBUG, v)
+}
+
+func (l *Logger) Infof(format string, v ...interface{}) {
+	l.addLinef(INFO, format, v)
+}
+
+func (l *Logger) Info(v ...interface{}) {
+	l.addLine(INFO, v)
+}
+
+func (l *Logger) Auditf(format string, v ...interface{}) {
+	l.addLinef(AUDIT, format, v)
+}
+
+func (l *Logger) Audit(v ...interface{}) {
+	l.addLine(AUDIT, v)
+}
+
+func (l *Logger) Warnf(format string, v ...interface{}) {
+	l.addLinef(WARNING, format, v)
+}
+
+func (l *Logger) Warn(v ...interface{}) {
+	l.addLine(WARNING, v)
+}
+
+func (l *Logger) Errorf(format string, v ...interface{}) {
+	l.addLinef(ERROR, format, v)
+}
+
+func (l *Logger) Error(v ...interface{}) {
+	l.addLine(ERROR, v)
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+func init() {
+	SetDefaultLogger(New(Options{}))
+}
+
+var gDefaultLoggerGuard sync.Mutex
 var gDefaultLogger *Logger
 
 func SetDefaultLogger(l *Logger) {
+
+	gDefaultLoggerGuard.Lock()
 
 	if gDefaultLogger != nil {
 		gDefaultLogger.Close()
 	}
 	gDefaultLogger = l
+	gDefaultLoggerGuard.Unlock()
 }
 
 func GetDefaultLogger() *Logger {
-	return gDefaultLogger
+	gDefaultLoggerGuard.Lock()
+	l := gDefaultLogger
+	gDefaultLoggerGuard.Unlock()
+	return l
 }
 
-func Auditf(format string, v ...interface{}) {
-	gDefaultLogger.addLinef(AUDIT, format, v)
+func Debugf(format string, v ...interface{}) {
+	GetDefaultLogger().addLinef(DEBUG, format, v)
 }
 
-func Audit(v ...interface{}) {
-	gDefaultLogger.addLine(AUDIT, v)
+func Debug(v ...interface{}) {
+	GetDefaultLogger().addLine(DEBUG, v)
 }
 
 func Infof(format string, v ...interface{}) {
-	gDefaultLogger.addLinef(INFO, format, v)
+	GetDefaultLogger().addLinef(INFO, format, v)
 }
 
 func Info(v ...interface{}) {
-	gDefaultLogger.addLine(INFO, v)
+	GetDefaultLogger().addLine(INFO, v)
+}
+
+func Auditf(format string, v ...interface{}) {
+	GetDefaultLogger().addLinef(AUDIT, format, v)
+}
+
+func Audit(v ...interface{}) {
+	GetDefaultLogger().addLine(AUDIT, v)
 }
 
 func Warnf(format string, v ...interface{}) {
-	gDefaultLogger.addLinef(WARNING, format, v)
+	GetDefaultLogger().addLinef(WARNING, format, v)
 }
 
 func Warn(v ...interface{}) {
-	gDefaultLogger.addLine(WARNING, v)
+	GetDefaultLogger().addLine(WARNING, v)
 }
 
 func Errorf(format string, v ...interface{}) {
-	gDefaultLogger.addLinef(ERROR, format, v)
+	GetDefaultLogger().addLinef(ERROR, format, v)
 }
 
 func Error(v ...interface{}) {
-	gDefaultLogger.addLine(ERROR, v)
+	GetDefaultLogger().addLine(ERROR, v)
 }
 
 func Fatalf(format string, v ...interface{}) {
-	gDefaultLogger.addLinef(FATAL, format, v)
-	gDefaultLogger.Close()
+	GetDefaultLogger().addLinef(FATAL, format, v)
+	Close()
 	os.Exit(1)
 }
 
 func Fatal(v ...interface{}) {
-	gDefaultLogger.addLine(FATAL, v)
-	gDefaultLogger.Close()
+	GetDefaultLogger().addLine(FATAL, v)
+	Close()
 	os.Exit(1)
 }
 
+func NewWriterAsLevel(level Level) io.Writer {
+	return GetDefaultLogger().NewWriterAsLevel(level)
+}
+
 func Close() {
-	SetDefaultLogger(nil)
-}
-
-func Debugf(format string, v ...interface{}) {
-	gDefaultLogger.addLinef(DEBUG, format, v)
-}
-
-func Debug(v ...interface{}) {
-	gDefaultLogger.addLine(DEBUG, v)
+	SetDefaultLogger(New(Options{LowerLevelToFile: DISABLED, LowerLevelToConsole: DISABLED, LogfilePrefix: "null"}))
 }
