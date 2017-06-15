@@ -331,15 +331,21 @@ func (l *Logger) addLine(level Level, a []interface{}) {
 	now := time.Now()
 
 	var buf bytes.Buffer
-	_, file, line, ok := runtime.Caller(2)
-	if ok {
-		for i := len(file) - 1; i > 0; i-- {
-			if file[i] == '/' {
-				file = file[i+1:]
-				break
+
+	if level != FATAL {
+		_, file, line, ok := runtime.Caller(2)
+		if ok {
+			for i := len(file) - 1; i > 0; i-- {
+				if file[i] == '/' {
+					file = file[i+1:]
+					break
+				}
 			}
+			fmt.Fprintf(&buf, "%s:%d: ", file, line)
 		}
-		fmt.Fprintf(&buf, "%s:%d: ", file, line)
+	} else {
+		io.WriteString(&buf, prettyStack(7)) // nolint: errcheck
+		io.WriteString(&buf, "\n\n")         // nolint: errcheck
 	}
 
 	fmt.Fprint(&buf, a...)
@@ -360,17 +366,22 @@ func (l *Logger) addLinef(level Level, format string, a []interface{}) {
 	now := time.Now()
 
 	var buf bytes.Buffer
-	_, file, line, ok := runtime.Caller(2)
-	if ok {
-		for i := len(file) - 1; i > 0; i-- {
-			if file[i] == '/' {
-				file = file[i+1:]
-				break
+	if level != FATAL {
+		_, file, line, ok := runtime.Caller(2)
+		if ok {
+			for i := len(file) - 1; i > 0; i-- {
+				if file[i] == '/' {
+					file = file[i+1:]
+					break
+				}
 			}
+			fmt.Fprintf(&buf, "%s:%d: ", file, line)
 		}
-		fmt.Fprintf(&buf, "%s:%d: ", file, line)
+	} else {
+		io.WriteString(&buf, "\n")           // nolint: errcheck
+		io.WriteString(&buf, prettyStack(7)) // nolint: errcheck
+		io.WriteString(&buf, "\n\n")         // nolint: errcheck
 	}
-
 	fmt.Fprintf(&buf, format, a...)
 
 	l.inputQueue <- logLine{
@@ -507,4 +518,28 @@ func NewWriterAsLevel(level Level) io.Writer {
 
 func Close() {
 	SetDefaultLogger(New(Options{LowerLevelToFile: DISABLED, LowerLevelToConsole: DISABLED, LogfilePrefix: "null"}))
+}
+
+func prettyStack(skipEntries int) string {
+	b := make([]byte, 4000)
+	n := runtime.Stack(b, false)
+	src := b[:n]
+	//fmt.Printf("%s\n", src)
+	a := strings.Split(strings.Trim(string(src), " \t\r\n"), "\n")
+	ss := a[skipEntries:]
+
+	maxWidth := 0
+	for i := 0; i < len(ss)-1; i += 2 {
+		method := ss[i]
+		file := strings.Split(strings.TrimLeft(ss[i+1], " \t"), " +")[0]
+		ss[i] = file
+		ss[i+1] = method
+		if maxWidth < len(file) {
+			maxWidth = len(file)
+		}
+	}
+	for i := 0; i < len(ss); i += 2 {
+		ss[i/2] = fmt.Sprintf("%-*s   %s", maxWidth, ss[i], ss[i+1])
+	}
+	return strings.Join(ss[:len(ss)/2+1], "\n")
 }
