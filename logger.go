@@ -186,7 +186,7 @@ func (l *Logger) Close() {
 		l.fp.Close()
 		l.fp = nil
 	}
-	l.inputQueue = nil
+	//l.inputQueue = nil
 }
 
 func (l *Logger) writeFileLine(line logLine) {
@@ -436,7 +436,11 @@ func (l *Logger) Error(v ...interface{}) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func init() {
-	SetDefaultLogger(New(Options{}))
+	if strings.Contains(os.Getenv("RLOG"), "debug") {
+		SetDefaultLogger(New(Options{LowerLevelToFile: DEBUG}))
+	} else {
+		SetDefaultLogger(New(Options{}))
+	}
 }
 
 var gDefaultLoggerGuard sync.Mutex
