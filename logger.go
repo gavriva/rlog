@@ -72,7 +72,7 @@ type Options struct {
 	// The default value is 100MiB
 	MaxFileSize int64
 
-	// MaxLogFiles is the maxumum number of log files.
+	// MaxLogFiles is the maximum number of log files.
 	//
 	// The default value is 3, current file + two rotated ones.
 	MaxLogFiles int64
