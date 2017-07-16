@@ -193,12 +193,12 @@ func (l *Logger) writeFileLine(line logLine) {
 
 	prefix := levelNames[line.level]
 
-	year, month, day := line.tm.Date()
+	_, month, day := line.tm.Date()
 	hour, min, sec := line.tm.Clock()
 	us := line.tm.Nanosecond() / 1e3
 
 	if l.fileWriter != nil {
-		n, _ := fmt.Fprintf(l.fileWriter, "%04d.%02d.%02d %02d:%02d:%02d.%06d %s %s\n", year, month, day, hour, min, sec, us, prefix, line.msg)
+		n, _ := fmt.Fprintf(l.fileWriter, "%02d.%02d %02d:%02d:%02d.%06d %s %s\n", month, day, hour, min, sec, us, prefix, line.msg)
 		l.fileSize += int64(n)
 	}
 }
@@ -357,7 +357,7 @@ func (l *Logger) addLine(level Level, a []interface{}) {
 	}
 }
 
-func (l *Logger) addLinef(level Level, format string, a []interface{}) {
+func (l *Logger) addLineF(level Level, format string, a []interface{}) {
 
 	if level < l.options.LowerLevelToFile && level < l.options.LowerLevelToConsole {
 		return
@@ -394,7 +394,7 @@ func (l *Logger) addLinef(level Level, format string, a []interface{}) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func (l *Logger) Debugf(format string, v ...interface{}) {
-	l.addLinef(DEBUG, format, v)
+	l.addLineF(DEBUG, format, v)
 }
 
 func (l *Logger) Debug(v ...interface{}) {
@@ -402,7 +402,7 @@ func (l *Logger) Debug(v ...interface{}) {
 }
 
 func (l *Logger) Infof(format string, v ...interface{}) {
-	l.addLinef(INFO, format, v)
+	l.addLineF(INFO, format, v)
 }
 
 func (l *Logger) Info(v ...interface{}) {
@@ -410,7 +410,7 @@ func (l *Logger) Info(v ...interface{}) {
 }
 
 func (l *Logger) Auditf(format string, v ...interface{}) {
-	l.addLinef(AUDIT, format, v)
+	l.addLineF(AUDIT, format, v)
 }
 
 func (l *Logger) Audit(v ...interface{}) {
@@ -418,7 +418,7 @@ func (l *Logger) Audit(v ...interface{}) {
 }
 
 func (l *Logger) Warnf(format string, v ...interface{}) {
-	l.addLinef(WARNING, format, v)
+	l.addLineF(WARNING, format, v)
 }
 
 func (l *Logger) Warn(v ...interface{}) {
@@ -426,7 +426,7 @@ func (l *Logger) Warn(v ...interface{}) {
 }
 
 func (l *Logger) Errorf(format string, v ...interface{}) {
-	l.addLinef(ERROR, format, v)
+	l.addLineF(ERROR, format, v)
 }
 
 func (l *Logger) Error(v ...interface{}) {
@@ -465,7 +465,7 @@ func GetDefaultLogger() *Logger {
 }
 
 func Debugf(format string, v ...interface{}) {
-	GetDefaultLogger().addLinef(DEBUG, format, v)
+	GetDefaultLogger().addLineF(DEBUG, format, v)
 }
 
 func Debug(v ...interface{}) {
@@ -473,7 +473,7 @@ func Debug(v ...interface{}) {
 }
 
 func Infof(format string, v ...interface{}) {
-	GetDefaultLogger().addLinef(INFO, format, v)
+	GetDefaultLogger().addLineF(INFO, format, v)
 }
 
 func Info(v ...interface{}) {
@@ -481,7 +481,7 @@ func Info(v ...interface{}) {
 }
 
 func Auditf(format string, v ...interface{}) {
-	GetDefaultLogger().addLinef(AUDIT, format, v)
+	GetDefaultLogger().addLineF(AUDIT, format, v)
 }
 
 func Audit(v ...interface{}) {
@@ -489,7 +489,7 @@ func Audit(v ...interface{}) {
 }
 
 func Warnf(format string, v ...interface{}) {
-	GetDefaultLogger().addLinef(WARNING, format, v)
+	GetDefaultLogger().addLineF(WARNING, format, v)
 }
 
 func Warn(v ...interface{}) {
@@ -497,7 +497,7 @@ func Warn(v ...interface{}) {
 }
 
 func Errorf(format string, v ...interface{}) {
-	GetDefaultLogger().addLinef(ERROR, format, v)
+	GetDefaultLogger().addLineF(ERROR, format, v)
 }
 
 func Error(v ...interface{}) {
@@ -505,7 +505,7 @@ func Error(v ...interface{}) {
 }
 
 func Fatalf(format string, v ...interface{}) {
-	GetDefaultLogger().addLinef(FATAL, format, v)
+	GetDefaultLogger().addLineF(FATAL, format, v)
 	Close()
 	os.Exit(1)
 }
