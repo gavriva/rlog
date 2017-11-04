@@ -393,6 +393,10 @@ func (l *Logger) addLineF(level Level, format string, a []interface{}) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+func (l *Logger) IsDebugEnabled() bool {
+	return l.options.LowerLevelToConsole <= DEBUG || l.options.LowerLevelToFile <= DEBUG
+}
+
 func (l *Logger) Debugf(format string, v ...interface{}) {
 	l.addLineF(DEBUG, format, v)
 }
@@ -462,6 +466,10 @@ func GetDefaultLogger() *Logger {
 	l := gDefaultLogger
 	gDefaultLoggerGuard.Unlock()
 	return l
+}
+
+func IsDebugEnabled() bool {
+	return GetDefaultLogger().IsDebugEnabled()
 }
 
 func Debugf(format string, v ...interface{}) {
