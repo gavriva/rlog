@@ -39,7 +39,7 @@ var levelNames = []string{
 }
 
 type logLine struct {
-	msg   string
+	msg   []byte
 	level Level
 	tm    time.Time
 }
@@ -178,7 +178,7 @@ func New(opts Options) *Logger {
 }
 
 func (l *Logger) Close() {
-	l.inputQueue <- logLine{"", closeLevel, time.Time{}}
+	l.inputQueue <- logLine{[]byte{0}, closeLevel, time.Time{}}
 	l.wg.Wait()
 
 	if l.fp != nil {
@@ -232,7 +232,7 @@ func (l *Logger) newFileLine(line logLine) {
 			l.fileSize = 0
 		}
 		l.writeFileLine(logLine{
-			msg:   "\n\n====================",
+			msg:   []byte("\n\n===================="),
 			level: AUDIT,
 			tm:    time.Now(),
 		})
@@ -257,7 +257,7 @@ func (l *Logger) newFileLine(line logLine) {
 		l.fileWriter.Reset(l.fp)
 
 		l.writeFileLine(logLine{
-			msg:   "\n\n====================",
+			msg:   []byte("\n\n===================="),
 			level: AUDIT,
 			tm:    time.Now(),
 		})
@@ -295,18 +295,19 @@ type logWriter struct {
 
 func (dw logWriter) Write(msg []byte) (int, error) {
 
-	s := string(msg)
-	if strings.HasSuffix(s, "\n") {
-		s = s[:len(s)-1]
+	l := len(msg)
+
+	if l > 0 && msg[l-1] == 0xA {
+		msg = msg[:l-1]
 	}
 
 	dw.l.inputQueue <- logLine{
-		msg:   s,
+		msg:   msg,
 		level: dw.level,
 		tm:    time.Now(),
 	}
 
-	return len(msg), nil
+	return l, nil
 }
 
 func (l *Logger) NewWriterAsLevel(level Level) io.Writer {
@@ -351,7 +352,7 @@ func (l *Logger) addLine(level Level, a []interface{}) {
 	fmt.Fprint(&buf, a...)
 
 	l.inputQueue <- logLine{
-		msg:   buf.String(),
+		msg:   buf.Bytes(),
 		level: level,
 		tm:    now,
 	}
@@ -385,7 +386,7 @@ func (l *Logger) addLineF(level Level, format string, a []interface{}) {
 	fmt.Fprintf(&buf, format, a...)
 
 	l.inputQueue <- logLine{
-		msg:   buf.String(),
+		msg:   buf.Bytes(),
 		level: level,
 		tm:    now,
 	}
