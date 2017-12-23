@@ -39,7 +39,7 @@ var levelNames = []string{
 }
 
 type logLine struct {
-	msg   []byte
+	msg   *bytes.Buffer
 	level Level
 	tm    time.Time
 }
@@ -59,23 +59,28 @@ type Logger struct {
 type Options struct {
 	// LowerLevelToFile defines minimal log level of a message to be written into the log file.
 	//
-	// The default value is INFO
+	// The default value is INFO.
 	LowerLevelToFile Level
 
 	// LowerLevelToFile defines minimal log level of a message to be written to console.
 	//
-	// The default value is AUDIT
+	// The default value is AUDIT.
 	LowerLevelToConsole Level
 
 	// MaxFileSize is the maximum size in bytes of a log file before rotation.
 	//
-	// The default value is 100MiB
+	// The default value is 100MiB.
 	MaxFileSize int64
 
 	// MaxLogFiles is the maximum number of log files.
 	//
 	// The default value is 3, current file + two rotated ones.
 	MaxLogFiles int64
+
+	// ShowFileLine enables feature to print file name and line number of the caller.
+	//
+	// The default value is false.
+	ShowFileLine bool
 
 	LogfilePrefix string
 }
@@ -131,7 +136,7 @@ func New(opts Options) *Logger {
 			case line := <-l.inputQueue:
 				if line.level >= l.options.LowerLevelToConsole && l.consoleQueue != nil {
 					sent := false
-					for sent == false {
+					for !sent {
 						select {
 						case l.consoleQueue <- line:
 							sent = true
@@ -149,9 +154,11 @@ func New(opts Options) *Logger {
 				if line.level >= l.options.LowerLevelToFile {
 					l.newFileLine(line)
 				}
+				line.msg.Reset()
+				bufPool.Put(line.msg)
 			case <-ticker.C:
 				if l.fp != nil {
-					l.fileWriter.Flush()
+					_ = l.fileWriter.Flush()
 				}
 			}
 		}
@@ -178,15 +185,14 @@ func New(opts Options) *Logger {
 }
 
 func (l *Logger) Close() {
-	l.inputQueue <- logLine{[]byte{0}, closeLevel, time.Time{}}
+	l.inputQueue <- logLine{&bytes.Buffer{}, closeLevel, time.Time{}}
 	l.wg.Wait()
 
 	if l.fp != nil {
-		l.fileWriter.Flush()
-		l.fp.Close()
+		_ = l.fileWriter.Flush()
+		_ = l.fp.Close()
 		l.fp = nil
 	}
-	//l.inputQueue = nil
 }
 
 func (l *Logger) writeFileLine(line logLine) {
@@ -231,20 +237,22 @@ func (l *Logger) newFileLine(line logLine) {
 		} else {
 			l.fileSize = 0
 		}
+		buf := &bytes.Buffer{}
+		buf.WriteString("\n\n====================")
 		l.writeFileLine(logLine{
-			msg:   []byte("\n\n===================="),
+			msg:   buf,
 			level: AUDIT,
 			tm:    time.Now(),
 		})
 	}
 
-	if l.fileSize+int64(len(line.msg))+33 > l.options.MaxFileSize {
+	if l.fileSize+int64(line.msg.Len())+33 > l.options.MaxFileSize {
 
-		l.fileWriter.Flush()
-		l.fp.Close()
+		_ = l.fileWriter.Flush()
+		_ = l.fp.Close()
 
 		for i := int(l.options.MaxLogFiles) - 1; i > 0; i-- {
-			os.Rename(l.logFileName(i-1), l.logFileName(i))
+			_ = os.Rename(l.logFileName(i-1), l.logFileName(i))
 		}
 		var err error
 		l.fileSize = 0
@@ -256,8 +264,10 @@ func (l *Logger) newFileLine(line logLine) {
 		}
 		l.fileWriter.Reset(l.fp)
 
+		buf := &bytes.Buffer{}
+		buf.WriteString("\n\n====================")
 		l.writeFileLine(logLine{
-			msg:   []byte("\n\n===================="),
+			msg:   buf,
 			level: AUDIT,
 			tm:    time.Now(),
 		})
@@ -301,8 +311,11 @@ func (dw logWriter) Write(msg []byte) (int, error) {
 		msg = msg[:l-1]
 	}
 
+	buf := bufPool.Get().(*bytes.Buffer)
+	_, _ = buf.Write(msg)
+
 	dw.l.inputQueue <- logLine{
-		msg:   msg,
+		msg:   buf,
 		level: dw.level,
 		tm:    time.Now(),
 	}
@@ -323,6 +336,12 @@ func (l *Logger) NewWriterAsLevel(level Level) io.Writer {
 	}
 }
 
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return &bytes.Buffer{}
+	},
+}
+
 func (l *Logger) addLine(level Level, a []interface{}) {
 
 	if level < l.options.LowerLevelToFile && level < l.options.LowerLevelToConsole {
@@ -331,28 +350,30 @@ func (l *Logger) addLine(level Level, a []interface{}) {
 
 	now := time.Now()
 
-	var buf bytes.Buffer
+	buf := bufPool.Get().(*bytes.Buffer)
 
 	if level != FATAL {
-		_, file, line, ok := runtime.Caller(2)
-		if ok {
-			for i := len(file) - 1; i > 0; i-- {
-				if file[i] == '/' {
-					file = file[i+1:]
-					break
+		if l.options.ShowFileLine {
+			_, file, line, ok := runtime.Caller(2)
+			if ok {
+				for i := len(file) - 1; i > 0; i-- {
+					if file[i] == '/' {
+						file = file[i+1:]
+						break
+					}
 				}
+				fmt.Fprintf(buf, "%s:%d: ", file, line)
 			}
-			fmt.Fprintf(&buf, "%s:%d: ", file, line)
 		}
 	} else {
-		io.WriteString(&buf, prettyStack(7)) // nolint: errcheck
-		io.WriteString(&buf, "\n\n")         // nolint: errcheck
+		io.WriteString(buf, prettyStack(7)) // nolint: errcheck
+		io.WriteString(buf, "\n\n")         // nolint: errcheck
 	}
 
-	fmt.Fprint(&buf, a...)
+	fmt.Fprint(buf, a...)
 
 	l.inputQueue <- logLine{
-		msg:   buf.Bytes(),
+		msg:   buf,
 		level: level,
 		tm:    now,
 	}
@@ -366,27 +387,30 @@ func (l *Logger) addLineF(level Level, format string, a []interface{}) {
 
 	now := time.Now()
 
-	var buf bytes.Buffer
+	buf := bufPool.Get().(*bytes.Buffer)
+
 	if level != FATAL {
-		_, file, line, ok := runtime.Caller(2)
-		if ok {
-			for i := len(file) - 1; i > 0; i-- {
-				if file[i] == '/' {
-					file = file[i+1:]
-					break
+		if l.options.ShowFileLine {
+			_, file, line, ok := runtime.Caller(2)
+			if ok {
+				for i := len(file) - 1; i > 0; i-- {
+					if file[i] == '/' {
+						file = file[i+1:]
+						break
+					}
 				}
+				fmt.Fprintf(buf, "%s:%d: ", file, line)
 			}
-			fmt.Fprintf(&buf, "%s:%d: ", file, line)
 		}
 	} else {
-		io.WriteString(&buf, "\n")           // nolint: errcheck
-		io.WriteString(&buf, prettyStack(7)) // nolint: errcheck
-		io.WriteString(&buf, "\n\n")         // nolint: errcheck
+		io.WriteString(buf, "\n")           // nolint: errcheck
+		io.WriteString(buf, prettyStack(7)) // nolint: errcheck
+		io.WriteString(buf, "\n\n")         // nolint: errcheck
 	}
-	fmt.Fprintf(&buf, format, a...)
+	fmt.Fprintf(buf, format, a...)
 
 	l.inputQueue <- logLine{
-		msg:   buf.Bytes(),
+		msg:   buf,
 		level: level,
 		tm:    now,
 	}
@@ -441,11 +465,14 @@ func (l *Logger) Error(v ...interface{}) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func init() {
+	var opt Options
 	if strings.Contains(os.Getenv("RLOG"), "debug") {
-		SetDefaultLogger(New(Options{LowerLevelToFile: DEBUG}))
-	} else {
-		SetDefaultLogger(New(Options{}))
+		opt.LowerLevelToFile = DEBUG
 	}
+	if strings.Contains(os.Getenv("RLOG"), "showfileline") {
+		opt.ShowFileLine = true
+	}
+	SetDefaultLogger(New(opt))
 }
 
 var gDefaultLoggerGuard sync.Mutex
