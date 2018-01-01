@@ -45,12 +45,11 @@ type logLine struct {
 }
 
 type Logger struct {
-	inputQueue   chan logLine
-	consoleQueue chan logLine
-	fp           *os.File
-	fileWriter   *bufio.Writer
-	fileSize     int64
-	options      Options
+	inputQueue chan logLine
+	fp         *os.File
+	fileWriter *bufio.Writer
+	fileSize   int64
+	options    Options
 
 	wg sync.WaitGroup
 }
@@ -134,22 +133,11 @@ func New(opts Options) *Logger {
 		for {
 			select {
 			case line := <-l.inputQueue:
-				if line.level >= l.options.LowerLevelToConsole && l.consoleQueue != nil {
-					sent := false
-					for !sent {
-						select {
-						case l.consoleQueue <- line:
-							sent = true
-						default:
-							select {
-							case <-l.consoleQueue:
-							default:
-							}
-						}
-					}
-				}
 				if line.level == closeLevel {
 					return
+				}
+				if line.level >= l.options.LowerLevelToConsole {
+					l.newConsoleLine(line)
 				}
 				if line.level >= l.options.LowerLevelToFile {
 					l.newFileLine(line)
@@ -164,23 +152,6 @@ func New(opts Options) *Logger {
 		}
 	}()
 
-	if l.options.LowerLevelToConsole <= FATAL {
-		l.consoleQueue = make(chan logLine, 101)
-		l.wg.Add(1)
-
-		go func() {
-			defer l.wg.Done()
-			for line := range l.consoleQueue {
-
-				if line.level == closeLevel {
-					return
-				}
-
-				l.newConsoleLine(line)
-			}
-		}()
-	}
-
 	return l
 }
 
@@ -192,6 +163,28 @@ func (l *Logger) Close() {
 		_ = l.fileWriter.Flush()
 		_ = l.fp.Close()
 		l.fp = nil
+	}
+}
+
+func (l *Logger) newConsoleLine(line logLine) {
+
+	if line.level > FATAL {
+		return
+	}
+
+	prefix := levelNames[line.level]
+	color := 0
+	if line.level >= ERROR {
+		color = 167
+	} else if line.level == WARNING {
+		color = 173
+	}
+	hour, min, sec := line.tm.Clock()
+	ms := line.tm.Nanosecond() / 1e6
+	if color > 0 {
+		fmt.Printf("\033[38;5;%dm%02d:%02d:%02d.%03d %s %s\033[m\n", color, hour, min, sec, ms, prefix, line.msg)
+	} else {
+		fmt.Printf("%02d:%02d:%02d.%03d %s %s\n", hour, min, sec, ms, prefix, line.msg)
 	}
 }
 
@@ -274,28 +267,6 @@ func (l *Logger) newFileLine(line logLine) {
 	}
 
 	l.writeFileLine(line)
-}
-
-func (l *Logger) newConsoleLine(line logLine) {
-
-	if line.level > FATAL {
-		return
-	}
-
-	prefix := levelNames[line.level]
-	color := 0
-	if line.level >= ERROR {
-		color = 167
-	} else if line.level == WARNING {
-		color = 173
-	}
-	hour, min, sec := line.tm.Clock()
-	ms := line.tm.Nanosecond() / 1e6
-	if color > 0 {
-		fmt.Printf("\033[38;5;%dm%02d:%02d:%02d.%03d %s %s\033[m\n", color, hour, min, sec, ms, prefix, line.msg)
-	} else {
-		fmt.Printf("%02d:%02d:%02d.%03d %s %s\n", hour, min, sec, ms, prefix, line.msg)
-	}
 }
 
 type logWriter struct {
