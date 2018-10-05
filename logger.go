@@ -313,19 +313,12 @@ var bufPool = sync.Pool{
 	},
 }
 
-func (l *Logger) addLine(level Level, a []interface{}) {
-
-	if level < l.options.LowerLevelToFile && level < l.options.LowerLevelToConsole {
-		return
-	}
-
-	now := time.Now()
-
+func (l *Logger) addPrefix(level Level) *bytes.Buffer {
 	buf := bufPool.Get().(*bytes.Buffer)
 
 	if level != FATAL {
 		if l.options.ShowFileLine {
-			_, file, line, ok := runtime.Caller(2)
+			_, file, line, ok := runtime.Caller(3)
 			if ok {
 				for i := len(file) - 1; i > 0; i-- {
 					if file[i] == '/' {
@@ -337,9 +330,25 @@ func (l *Logger) addLine(level Level, a []interface{}) {
 			}
 		}
 	} else {
-		io.WriteString(buf, prettyStack(7)) // nolint: errcheck
-		io.WriteString(buf, "\n\n")         // nolint: errcheck
+		io.WriteString(buf, "\n\n") // nolint: errcheck
+		bt := make([]byte, 64000)
+		bt = bt[:runtime.Stack(bt, true)]
+		buf.Write(bt)
+		io.WriteString(buf, "\n") // nolint: errcheck
 	}
+
+	return buf
+}
+
+func (l *Logger) addLine(level Level, a []interface{}) {
+
+	if level < l.options.LowerLevelToFile && level < l.options.LowerLevelToConsole {
+		return
+	}
+
+	now := time.Now()
+
+	buf := l.addPrefix(level)
 
 	fmt.Fprint(buf, a...)
 
@@ -358,26 +367,8 @@ func (l *Logger) addLineF(level Level, format string, a []interface{}) {
 
 	now := time.Now()
 
-	buf := bufPool.Get().(*bytes.Buffer)
+	buf := l.addPrefix(level)
 
-	if level != FATAL {
-		if l.options.ShowFileLine {
-			_, file, line, ok := runtime.Caller(2)
-			if ok {
-				for i := len(file) - 1; i > 0; i-- {
-					if file[i] == '/' {
-						file = file[i+1:]
-						break
-					}
-				}
-				fmt.Fprintf(buf, "%s:%d: ", file, line)
-			}
-		}
-	} else {
-		io.WriteString(buf, "\n")           // nolint: errcheck
-		io.WriteString(buf, prettyStack(7)) // nolint: errcheck
-		io.WriteString(buf, "\n\n")         // nolint: errcheck
-	}
 	fmt.Fprintf(buf, format, a...)
 
 	l.inputQueue <- logLine{
@@ -529,28 +520,4 @@ func NewWriterAsLevel(level Level) io.Writer {
 
 func Close() {
 	SetDefaultLogger(New(Options{LowerLevelToFile: DISABLED, LowerLevelToConsole: DISABLED, LogfilePrefix: "null"}))
-}
-
-func prettyStack(skipEntries int) string {
-	b := make([]byte, 4000)
-	n := runtime.Stack(b, false)
-	src := b[:n]
-	//fmt.Printf("%s\n", src)
-	a := strings.Split(strings.Trim(string(src), " \t\r\n"), "\n")
-	ss := a[skipEntries:]
-
-	maxWidth := 0
-	for i := 0; i < len(ss)-1; i += 2 {
-		method := ss[i]
-		file := strings.Split(strings.TrimLeft(ss[i+1], " \t"), " +")[0]
-		ss[i] = file
-		ss[i+1] = method
-		if maxWidth < len(file) {
-			maxWidth = len(file)
-		}
-	}
-	for i := 0; i < len(ss); i += 2 {
-		ss[i/2] = fmt.Sprintf("%-*s   %s", maxWidth, ss[i], ss[i+1])
-	}
-	return strings.Join(ss[:len(ss)/2+1], "\n")
 }
