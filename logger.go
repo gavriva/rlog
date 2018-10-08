@@ -58,7 +58,7 @@ type Logger struct {
 type Options struct {
 	// LowerLevelToFile defines minimal log level of a message to be written into the log file.
 	//
-	// The default value is INFO.
+	// The default value is DISABLED.
 	LowerLevelToFile Level
 
 	// LowerLevelToFile defines minimal log level of a message to be written to console.
@@ -81,37 +81,24 @@ type Options struct {
 	// The default value is false.
 	ShowFileLine bool
 
+	// ShowFileLine disables feature to print file name and line number of the caller.
+	//
+	// The default value is false.
+	HideFileLine bool
+
 	LogfilePrefix string
 }
 
 func New(opts Options) *Logger {
+
+	gDefaultOptionsGuard.Lock()
+	newOpts := gDefaultOptions
+	gDefaultOptionsGuard.Unlock()
+	updateOptions(&newOpts, opts)
+
 	l := &Logger{
 		inputQueue: make(chan logLine, 2048),
-		options:    opts,
-	}
-
-	if l.options.LowerLevelToFile < DEBUG {
-		l.options.LowerLevelToFile = INFO
-	} else if l.options.LowerLevelToFile > DISABLED {
-		l.options.LowerLevelToFile = DISABLED
-	}
-
-	if l.options.LowerLevelToConsole < DEBUG {
-		l.options.LowerLevelToConsole = AUDIT
-	} else if l.options.LowerLevelToConsole > DISABLED {
-		l.options.LowerLevelToConsole = DISABLED
-	}
-
-	if l.options.MaxFileSize <= 16000 {
-		l.options.MaxFileSize = 100 * 1024 * 1024
-	}
-
-	if l.options.MaxLogFiles <= 0 {
-		l.options.MaxLogFiles = 3
-	}
-
-	if l.options.MaxLogFiles > 10 {
-		l.options.MaxLogFiles = 10
+		options:    newOpts,
 	}
 
 	if len(l.options.LogfilePrefix) == 0 {
@@ -326,7 +313,7 @@ func (l *Logger) addPrefix(level Level) *bytes.Buffer {
 						break
 					}
 				}
-				fmt.Fprintf(buf, "%s:%d: ", file, line)
+				_, _ = fmt.Fprintf(buf, "%s:%d: ", file, line)
 			}
 		}
 	} else {
@@ -350,7 +337,7 @@ func (l *Logger) addLine(level Level, a []interface{}) {
 
 	buf := l.addPrefix(level)
 
-	fmt.Fprint(buf, a...)
+	_, _ = fmt.Fprint(buf, a...)
 
 	l.inputQueue <- logLine{
 		msg:   buf,
@@ -369,7 +356,7 @@ func (l *Logger) addLineF(level Level, format string, a []interface{}) {
 
 	buf := l.addPrefix(level)
 
-	fmt.Fprintf(buf, format, a...)
+	_, _ = fmt.Fprintf(buf, format, a...)
 
 	l.inputQueue <- logLine{
 		msg:   buf,
@@ -426,21 +413,102 @@ func (l *Logger) Error(v ...interface{}) {
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+var gDefaultOptionsGuard sync.Mutex
+var gDefaultOptions Options = Options{
+	LowerLevelToFile:    DISABLED,
+	LowerLevelToConsole: AUDIT,
+	MaxFileSize:         100 * 1024 * 1024,
+	MaxLogFiles:         3,
+	ShowFileLine:        false,
+}
+
 func init() {
-	var opt Options
-	if strings.Contains(os.Getenv("RLOG"), "debug") {
-		opt.LowerLevelToFile = DEBUG
+	changeSettingsByEnv(&gDefaultOptions)
+	setDefaultLogger(New(gDefaultOptions))
+}
+
+func changeSettingsByEnv(opt *Options) {
+
+	for _, s := range strings.Split(os.Getenv("RLOG"), ",") {
+
+		switch s {
+		case "debug":
+			opt.LowerLevelToFile = DEBUG
+			opt.LowerLevelToConsole = DEBUG
+		case "warning":
+			opt.LowerLevelToFile = WARNING
+			opt.LowerLevelToConsole = WARNING
+		case "disabled":
+			opt.LowerLevelToFile = DISABLED
+			opt.LowerLevelToConsole = DISABLED
+		case "showfileline":
+			opt.ShowFileLine = true
+		case "hidefileline":
+			opt.ShowFileLine = false
+		case "disk_disabled":
+			opt.LowerLevelToFile = DISABLED
+		case "disk_debug":
+			opt.LowerLevelToFile = DEBUG
+		case "console_disabled":
+			opt.LowerLevelToConsole = DISABLED
+		case "console_debug":
+			opt.LowerLevelToConsole = DEBUG
+		}
 	}
-	if strings.Contains(os.Getenv("RLOG"), "showfileline") {
-		opt.ShowFileLine = true
+
+}
+
+func updateOptions(dst *Options, src Options) {
+
+	if src.LowerLevelToFile != 0 {
+		dst.LowerLevelToFile = src.LowerLevelToFile
 	}
-	SetDefaultLogger(New(opt))
+
+	if src.LowerLevelToConsole != 0 {
+		dst.LowerLevelToConsole = src.LowerLevelToConsole
+	}
+
+	if src.MaxFileSize != 0 {
+		dst.MaxFileSize = src.MaxFileSize
+	}
+
+	if src.MaxLogFiles != 0 {
+		dst.MaxLogFiles = src.MaxLogFiles
+	}
+
+	if src.ShowFileLine {
+		dst.ShowFileLine = true
+	}
+
+	if src.HideFileLine {
+		dst.ShowFileLine = false
+	}
+
+	if len(src.LogfilePrefix) > 0 {
+		dst.LogfilePrefix = src.LogfilePrefix
+	}
+}
+
+func ChangeDefaults(opt Options) {
+
+	gDefaultOptionsGuard.Lock()
+
+	updateOptions(&gDefaultOptions, opt)
+	changeSettingsByEnv(&gDefaultOptions)
+
+	newOpts := gDefaultOptions
+
+	gDefaultOptionsGuard.Unlock()
+
+	if GetDefaultLogger().options != newOpts {
+		setDefaultLogger(New(newOpts))
+	}
 }
 
 var gDefaultLoggerGuard sync.Mutex
 var gDefaultLogger *Logger
 
-func SetDefaultLogger(l *Logger) {
+func setDefaultLogger(l *Logger) {
 
 	gDefaultLoggerGuard.Lock()
 
@@ -519,5 +587,5 @@ func NewWriterAsLevel(level Level) io.Writer {
 }
 
 func Close() {
-	SetDefaultLogger(New(Options{LowerLevelToFile: DISABLED, LowerLevelToConsole: DISABLED, LogfilePrefix: "null"}))
+	setDefaultLogger(New(Options{LowerLevelToFile: DISABLED, LowerLevelToConsole: DISABLED, LogfilePrefix: "null"}))
 }
